@@ -4,16 +4,14 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MultiLabelBinarizer
 from matplotlib import pyplot as plt
 import re
-from sklearn.tree import DecisionTreeRegressor
 from xgboost import XGBRegressor
-from sklearn.metrics import mean_absolute_error, r2_score
+from sklearn.metrics import mean_absolute_error, r2_score, mean_absolute_percentage_error
 from image_processing import embed_property
 from tqdm import tqdm
 from sklearn.decomposition import PCA
 import os
 
 USE_IMAGES = True
-
 csv_path = "data/properties.csv"
 
 df = pd.read_csv(csv_path, header=None, encoding="utf-8", na_values=["NA", "NaN", "", "Missing value", "missing value"])
@@ -163,6 +161,7 @@ if USE_IMAGES:
         np.save(refs_path, np.array(ref_arr))
 
     else:
+        print("Loading precomputed image embeddings...")
         emb_matrix = np.load(emb_path)
         has_images = np.load(has_path)
         ref_arr = np.load(refs_path)
@@ -188,11 +187,7 @@ if USE_IMAGES:
     # add the flag into df_clean so it goes through encoding normally
     df_clean["has_images"] = has_images
 
-    print("Embeddings shape (all rows):", emb_matrix.shape)
     print("Rows with images:", has_images.sum(), "/", len(has_images))
-
-    print("Found embeddings for ", emb_matrix.shape[0], " properties.")
-
 
 
 cat_cols = ["location", "property_type"]
@@ -221,7 +216,7 @@ df_model = pd.concat(
     axis=1
 )
 
-y = df_model["price_eur"]
+y = np.log1p(df_model["price_eur"])
 
 X = df_model.drop(
     columns=[
@@ -236,15 +231,23 @@ X = df_model.drop(
 X.shape, y.shape
 
 if USE_IMAGES:
-    X_train, X_test, y_train, y_test, emb_train, emb_test = train_test_split(
+    X_train, X_temp, y_train, y_temp, emb_train, emb_temp = train_test_split(
         X, y, emb_matrix,
-        test_size=0.2,
+        test_size=0.3,
+        random_state=42
+    )
+
+    X_test, X_val, y_test, y_val, emb_test, emb_val = train_test_split(
+        X_temp, y_temp, emb_temp,
+        test_size=0.5,
         random_state=42
     )
 
     pca = PCA(n_components=50, random_state=0)
+    print("Fitting PCA on image embeddings...")
     emb_train_red = pca.fit_transform(emb_train)
     emb_test_red  = pca.transform(emb_test)
+    emb_val_red = pca.transform(emb_val)
 
     emb_cols = [f"img_{i}" for i in range(emb_train_red.shape[1])]
 
@@ -260,34 +263,65 @@ if USE_IMAGES:
         axis=1
     )
 
+    X_val = pd.concat(
+        [X_val.reset_index(drop=True),
+        pd.DataFrame(emb_val_red, columns=emb_cols)],
+        axis=1
+    )
+
 else:
-    X_train, X_test, y_train, y_test = train_test_split(
+    X_train, X_temp, y_train, y_temp = train_test_split(
         X, y,
-        test_size=0.2,
+        test_size=0.3,
+        random_state=42
+    )
+
+    X_test, X_val, y_test, y_val = train_test_split(
+        X_temp, y_temp,
+        test_size=0.5,
         random_state=42
     )
 
 tree = XGBRegressor(
-    n_estimators=5000,
+    n_estimators=2000,
     learning_rate=0.03,
-    max_depth=8,
-    min_child_weight=5,
-    gamma=0.0,
-    subsample=0.8,
-    colsample_bytree=0.8,
-    reg_alpha=0.0,
-    reg_lambda=1.0,
+    max_depth=6,
+    min_child_weight=15,
+    gamma=0.2,
+    subsample=0.6,
+    colsample_bytree=0.6,
+    reg_alpha=0.1,
+    reg_lambda=4.0,
     objective="reg:squarederror",
     random_state=0,
-    n_jobs=-1
+    n_jobs=-1, 
+)
+print("Training XGBoost regressor...")
+tree.fit(   
+    X_train, y_train, 
+    eval_set=[(X_val, y_val)],
+    verbose=100
 )
 
-tree.fit(X_train, y_train)
+y_pred_train = np.expm1(tree.predict(X_train))
+y_pred_test = np.expm1(tree.predict(X_test))
+y_train = np.expm1(y_train)
+y_test = np.expm1(y_test)
 
-y_pred = tree.predict(X_test)
+train_mae = mean_absolute_error(y_train, y_pred_train)
+train_mape = mean_absolute_percentage_error(y_train, y_pred_train)
+train_r2 = r2_score(y_train, y_pred_train)
 
-mae = mean_absolute_error(y_test, y_pred)
-r2 = r2_score(y_test, y_pred)
+test_mae = mean_absolute_error(y_test, y_pred_test)
+test_mape = mean_absolute_percentage_error(y_test, y_pred_test)
+test_r2 = r2_score(y_test, y_pred_test)
 
-print(f"MAE: {mae:,.0f} €")
-print(f"R²: {r2:.3f}")
+print("Training set metrics:")
+print(f"MAE: {train_mae:,.0f} €")
+print(f"MAPE: {train_mape:.3f}")
+print(f"R²: {train_r2:.3f}\n")
+
+print("Test set metrics:")
+print(f"MAE: {test_mae:,.0f} €")
+print(f"MAPE: {test_mape:.3f}")
+print(f"R²: {test_r2:.3f}")
