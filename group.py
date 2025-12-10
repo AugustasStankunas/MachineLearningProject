@@ -11,6 +11,49 @@ from tqdm import tqdm
 from sklearn.decomposition import PCA
 import os
 
+from pathlib import Path
+import json
+import joblib
+
+from parameter_search import run_param_search
+
+ARTIFACT_DIR = Path("artifacts")
+PARAMS_PATH = ARTIFACT_DIR / "best_xgb_params.json"
+MODEL_PATH = ARTIFACT_DIR / "xgb_model.joblib"
+
+def load_best_params():
+    if PARAMS_PATH.exists():
+        with PARAMS_PATH.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        print(f"Loaded hyperparameters from {PARAMS_PATH}")
+        return data["best_params"], data.get("best_score")
+    return None, None
+
+
+def save_best_params(best_params, best_score):
+    ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "best_params": best_params,
+        "best_score": best_score,
+    }
+    with PARAMS_PATH.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    print(f"Saved hyperparameters to {PARAMS_PATH}")
+
+def load_model():
+    if MODEL_PATH.exists():
+        model = joblib.load(MODEL_PATH)
+        print(f"Loaded model from {MODEL_PATH}")
+        return model
+    return None
+
+
+def save_model(model):
+    ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+    joblib.dump(model, MODEL_PATH)
+    print(f"Saved model to {MODEL_PATH}")
+
+
 def get_data():
     USE_IMAGES = True
     csv_path = "data/properties.csv"
@@ -181,6 +224,7 @@ def get_data():
                 # else: keep zeros + has=0
 
             emb_matrix = aligned_embs
+            has_images = aligned_has
             has_images_arr = aligned_has
 
         has_images = np.array(has_images, dtype=np.int8)
@@ -285,49 +329,99 @@ def get_data():
 
     return X_train, X_test, X_val, y_train, y_test, y_val
 
+def get_or_train_model(
+    X_train,
+    X_val,
+    y_train,
+    y_val,
+    force_search: bool = False,
+    force_retrain: bool = False,
+):
+    if not force_retrain:
+        model = load_model()
+        if model is not None:
+            return model
+    best_params, best_score = (None, None)
+    if not force_search:
+        best_params, best_score = load_best_params()
+
+    if best_params is None:
+        print("No saved hyperparameters found or force_search=True -> running search...")
+        best_params, best_score = run_param_search(X_train, X_val, y_train, y_val)
+        save_best_params(best_params, best_score)
+
+    print("Using hyperparameters:", best_params)
+    if best_score is not None:
+        print(f"CV R² on euros (CV): {best_score:.4f}")
+
+    # 3) Train final model with those hyperparameters
+    # Optionally bump n_estimators up to a larger cap, letting early stopping find best iteration
+    best_params = best_params.copy()
+    best_params["n_estimators"] = max(2000, best_params.get("n_estimators", 2000))
+
+    model = XGBRegressor(
+        objective="reg:squarederror",
+        random_state=0,
+        n_jobs=-1,
+        early_stopping_rounds=200,
+        **best_params,
+    )
+
+    print("Training final XGBoost model...")
+    model.fit(
+        X_train,
+        y_train,
+        eval_set=[(X_val, y_val)],
+        verbose=100,
+    )
+
+    save_model(model)
+    return model
+
+
 def main():
     X_train, X_test, X_val, y_train, y_test, y_val = get_data()
 
-    tree = XGBRegressor(
-        n_estimators=2000,
-        learning_rate=0.03,
-        max_depth=6,
-        min_child_weight=15,
-        gamma=0.2,
-        subsample=0.6,
-        colsample_bytree=0.6,
-        reg_alpha=0.1,
-        reg_lambda=4.0,
-        objective="reg:squarederror",
-        random_state=0,
-        n_jobs=-1, 
-    )
-    print("Training XGBoost regressor...")
-    tree.fit(   
-        X_train, y_train, 
-        eval_set=[(X_val, y_val)],
-        verbose=100
+    # Change flags if you want to force a fresh search or retrain
+    model = get_or_train_model(
+        X_train, X_val, y_train, y_val,
+        force_search=True,
+        force_retrain=True,
     )
 
-    y_pred_train = np.expm1(tree.predict(X_train))
-    y_pred_test = np.expm1(tree.predict(X_test))
-    y_train = np.expm1(y_train)
-    y_test = np.expm1(y_test)
+    print("Evaluating model...")
 
-    train_mae = mean_absolute_error(y_train, y_pred_train)
-    train_mape = mean_absolute_percentage_error(y_train, y_pred_train)
-    train_r2 = r2_score(y_train, y_pred_train)
+    # --- metrics on log scale (same target as training) ---
+    y_pred_train_log = model.predict(X_train)
+    y_pred_test_log  = model.predict(X_test)
 
-    test_mae = mean_absolute_error(y_test, y_pred_test)
-    test_mape = mean_absolute_percentage_error(y_test, y_pred_test)
-    test_r2 = r2_score(y_test, y_pred_test)
+    train_r2_log = r2_score(y_train, y_pred_train_log)
+    test_r2_log  = r2_score(y_test, y_pred_test_log)
 
-    print("Training set metrics:")
+    print("Log-scale R² (log1p(price)):")
+    print(f"  Train R² (log): {train_r2_log:.3f}")
+    print(f"  Test  R² (log): {test_r2_log:.3f}\n")
+
+    # --- convert back to euros for more intuitive metrics ---
+    y_train_eur = np.expm1(y_train)
+    y_test_eur  = np.expm1(y_test)
+    y_pred_train_eur = np.expm1(y_pred_train_log)
+    y_pred_test_eur  = np.expm1(y_pred_test_log)
+
+    train_mae = mean_absolute_error(y_train_eur, y_pred_train_eur)
+    train_mape = mean_absolute_percentage_error(y_train_eur, y_pred_train_eur)
+    train_r2 = r2_score(y_train_eur, y_pred_train_eur)
+
+    test_mae = mean_absolute_error(y_test_eur, y_pred_test_eur)
+    test_mape = mean_absolute_percentage_error(y_test_eur, y_pred_test_eur)
+    test_r2 = r2_score(y_test_eur, y_pred_test_eur)
+
+    print("Training set metrics (EUR):")
     print(f"MAE: {train_mae:,.0f} €")
     print(f"MAPE: {train_mape:.3f}")
     print(f"R²: {train_r2:.3f}\n")
 
-    print("Test set metrics:")
+    print("Test set metrics (EUR):")
     print(f"MAE: {test_mae:,.0f} €")
     print(f"MAPE: {test_mape:.3f}")
     print(f"R²: {test_r2:.3f}")
