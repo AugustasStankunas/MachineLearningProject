@@ -50,13 +50,11 @@ def run_param_search(X_train, X_val, y_train, y_val, *, random_state=42):
         verbose=1,
     )
 
-    X_full = pd.concat([X_train, X_val], axis=0).reset_index(drop=True)
-    y_full = pd.concat([pd.Series(y_train), pd.Series(y_val)], axis=0).reset_index(drop=True)
 
     print("Starting hyperparameter search...")
     search.fit(
-        X_full,
-        y_full,
+        X_train,
+        y_train,
         eval_set=[(X_val, y_val)],
         verbose=False,
     )
