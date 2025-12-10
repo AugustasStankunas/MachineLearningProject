@@ -385,8 +385,8 @@ def main():
     # Change flags if you want to force a fresh search or retrain
     model = get_or_train_model(
         X_train, X_val, y_train, y_val,
-        force_search=True,
-        force_retrain=True,
+        force_search=False,
+        force_retrain=False,
     )
 
     print("Evaluating model...")
