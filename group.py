@@ -20,6 +20,9 @@ from parameter_search import run_param_search
 ARTIFACT_DIR = Path("artifacts")
 PARAMS_PATH = ARTIFACT_DIR / "best_xgb_params.json"
 MODEL_PATH = ARTIFACT_DIR / "xgb_model.joblib"
+# Added: Paths for PCA and model columns to support prediction in UI without retraining
+PCA_PATH = ARTIFACT_DIR / "pca.joblib"
+COLUMNS_PATH = ARTIFACT_DIR / "model_columns.json"
 
 def load_best_params():
     if PARAMS_PATH.exists():
@@ -52,6 +55,27 @@ def save_model(model):
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
     joblib.dump(model, MODEL_PATH)
     print(f"Saved model to {MODEL_PATH}")
+
+# Added: Function to load PCA for image embeddings reduction in predictions
+def load_pca():
+    if PCA_PATH.exists():
+        pca = joblib.load(PCA_PATH)
+        print(f"Loaded PCA from {PCA_PATH}")
+        return pca
+    return None
+
+# Added: Function to save PCA after fitting
+def save_pca(pca):
+    ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+    joblib.dump(pca, PCA_PATH)
+    print(f"Saved PCA to {PCA_PATH}")
+
+# Added: Function to save model input columns for alignment in predictions
+def save_columns(columns):
+    ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+    with COLUMNS_PATH.open("w", encoding="utf-8") as f:
+        json.dump(columns, f, indent=2)
+    print(f"Saved model columns to {COLUMNS_PATH}")
 
 
 def get_data():
@@ -294,6 +318,9 @@ def get_data():
         emb_test_red  = pca.transform(emb_test)
         emb_val_red = pca.transform(emb_val)
 
+        # Added: Save PCA after fitting for use in predictions
+        save_pca(pca)
+
         emb_cols = [f"img_{i}" for i in range(emb_train_red.shape[1])]
 
         X_train = pd.concat(
@@ -326,6 +353,9 @@ def get_data():
             test_size=0.5,
             random_state=42
         )
+
+    # Added: Save the final model input columns after all transformations for alignment in UI predictions
+    save_columns(list(X_train.columns))
 
     return X_train, X_test, X_val, y_train, y_test, y_val
 
